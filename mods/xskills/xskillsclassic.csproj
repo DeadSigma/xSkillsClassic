@@ -1,0 +1,217 @@
+<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<TargetFramework>net10.0</TargetFramework>
+		<OutputType>Library</OutputType>
+		<GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+		<NuGetAudit>false</NuGetAudit>
+	</PropertyGroup>
+	<PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
+		<VINTAGE_STORY>C:\Users\Mrzub\AppData\Roaming\Vintagestory 1.22.2</VINTAGE_STORY>
+		<OutputPath>.\bin</OutputPath>
+		<IntermediateOutputPath>.\obj\Debug\xskills\</IntermediateOutputPath>
+	</PropertyGroup>
+	<PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
+		<OutputPath>.\bin</OutputPath>
+		<IntermediateOutputPath>.\obj\Release\xskills\</IntermediateOutputPath>
+	</PropertyGroup>
+	<ItemGroup>
+		<Compile Remove="bin\**" />
+		<Compile Remove="src\Debug\**" />
+		<Compile Remove="src\Patches\Mining\**" />
+		<EmbeddedResource Remove="bin\**" />
+		<EmbeddedResource Remove="src\Debug\**" />
+		<EmbeddedResource Remove="src\Patches\Mining\**" />
+		<None Remove="bin\**" />
+		<None Remove="src\Debug\**" />
+		<None Remove="src\Patches\Mining\**" />
+	</ItemGroup>
+	<ItemGroup>
+		<PackageReference Include="System.Data.DataSetExtensions" Version="4.5.0" />
+		<PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+		<PackageReference Include="VSImGui" Version="0.0.6" />
+		<PackageReference Include="VSImGui_DebugTools" Version="0.0.6" />
+	</ItemGroup>
+	<ItemGroup>
+		<Reference Include="0Harmony, Version=2.0.4.0, Culture=neutral, processorArchitecture=MSIL">
+			<SpecificVersion>False</SpecificVersion>
+			<HintPath>$(VINTAGE_STORY)\Lib\0Harmony.dll</HintPath>
+		</Reference>
+		<Reference Include="ACulinaryArtillery">
+			<HintPath>..\..\..\vshelper\dependencies\ACulinaryArtillery.dll</HintPath>
+		</Reference>
+		<Reference Include="ElectricalProgressive-QOL">
+			<HintPath>..\..\..\vshelper\dependenciesElectricalProgressive-QOL.dll</HintPath>
+		</Reference>
+		<Reference Include="cairo-sharp">
+			<HintPath>$(VINTAGE_STORY)\Lib\cairo-sharp.dll</HintPath>
+		</Reference>
+		<Reference Include="Overhaullib">
+			<HintPath>..\..\..\vshelper\dependencies\Overhaullib.dll</HintPath>
+		</Reference>
+		<Reference Include="xlib">
+			<HintPath>..\..\..\vshelper\dependencies\xlib.dll</HintPath>
+		</Reference>
+		<Reference Include="primitivesurvival">
+			<HintPath>..\..\..\vshelper\dependencies\primitivesurvival.dll</HintPath>
+		</Reference>
+		<Reference Include="Microsoft.Data.Sqlite">
+			<HintPath>$(VINTAGE_STORY)\Lib\Microsoft.Data.Sqlite.dll</HintPath>
+			<Private>False</Private>
+		</Reference>
+		<Reference Include="OpenTK.Core">
+			<HintPath>$(VINTAGE_STORY)\Lib\OpenTK.Core.dll</HintPath>
+		</Reference>
+		<Reference Include="OpenTK.Mathematics">
+			<HintPath>$(VINTAGE_STORY)\Lib\OpenTK.Mathematics.dll</HintPath>
+		</Reference>
+		<Reference Include="OpenTK.Windowing.Common">
+			<HintPath>$(VINTAGE_STORY)\Lib\OpenTK.Windowing.Common.dll</HintPath>
+		</Reference>
+		<Reference Include="OpenTK.Windowing.Desktop">
+			<HintPath>$(VINTAGE_STORY)\Lib\OpenTK.Windowing.Desktop.dll</HintPath>
+		</Reference>
+		<Reference Include="protobuf-net, Version=2.1.0.0, Culture=neutral, PublicKeyToken=257b51d87d2e4d67, processorArchitecture=MSIL">
+			<SpecificVersion>False</SpecificVersion>
+			<HintPath>$(VINTAGE_STORY)\Lib\protobuf-net.dll</HintPath>
+		</Reference>
+		<Reference Include="VintagestoryAPI">
+			<HintPath>$(VINTAGE_STORY)\VintagestoryAPI.dll</HintPath>
+			<Private>False</Private>
+		</Reference>
+		<Reference Include="VintagestoryLib, Version=1.0.0.0, Culture=neutral, processorArchitecture=MSIL">
+			<SpecificVersion>False</SpecificVersion>
+			<HintPath>$(VINTAGE_STORY)\VintagestoryLib.dll</HintPath>
+		</Reference>
+		<Reference Include="VSSurvivalMod">
+			<HintPath>$(VINTAGE_STORY)\Mods\VSSurvivalMod.dll</HintPath>
+			<Private>False</Private>
+		</Reference>
+		<Reference Include="VSEssentials">
+			<HintPath>$(VINTAGE_STORY)\Mods\VSEssentials.dll</HintPath>
+			<Private>False</Private>
+		</Reference>
+		<Reference Include="cairo-sharp">
+			<HintPath>$(VINTAGE_STORY)/Lib/cairo-sharp.dll</HintPath>
+			<Private>False</Private>
+		</Reference>
+	
+		<Reference Include="VSCreativeMod">
+			<HintPath>$(VINTAGE_STORY)\Mods\VSCreativeMod.dll</HintPath>
+			<Private>False</Private>
+
+		</Reference>
+	</ItemGroup>
+	<ItemGroup>
+		<Content Include="assets\xskills\lang\cn.json" />
+		<Content Include="assets\xskills\lang\de.json" />
+		<Content Include="assets\xskills\lang\en.json" />
+		<Content Include="assets\xskills\lang\es-es.json" />
+		<Content Include="assets\xskills\lang\fr.json" />
+		<Content Include="assets\xskills\lang\pl.json" />
+		<Content Include="assets\xskills\lang\pt-br.json" />
+		<Content Include="assets\xskills\lang\ro.json" />
+		<Content Include="assets\xskills\lang\ru.json" />
+		<Content Include="assets\xskills\lang\sv.json" />
+		<Content Include="assets\xskills\lang\uk.json" />
+		<Content Include="assets\xskills\patches\combat\combat.json" />
+		<Content Include="assets\xskills\patches\digging.json" />
+		<Content Include="assets\xskills\patches\farming\crops.json" />
+		<Content Include="assets\xskills\patches\forestry\forestry.json" />
+		<Content Include="assets\xskills\patches\husbandry\primitivesurvival.json" />
+		<Content Include="assets\xskills\patches\husbandry\moreanimals.json" />
+		<Content Include="assets\xskills\patches\metalworking.json" />
+		<Content Include="assets\xskills\patches\mining.json" />
+		<Content Include="assets\xskills\patches\xskills.json" />
+		<Content Include="assets\xskills\recipes\barrel\mead.json" />
+		<Content Include="assets\xskills\recipes\cooking\salt.json" />
+		<Content Include="assets\xskills\recipes\cooking\lime.json" />
+		<Content Include="assets\xskills\skills\alchemy.json" />
+		<Content Include="assets\xskills\skills\combat.json" />
+		<Content Include="assets\xskills\skills\digging.json" />
+		<Content Include="assets\xskills\skills\farming.json" />
+		<Content Include="assets\xskills\skills\forestry.json" />
+		<Content Include="assets\xskills\skills\mining.json" />
+		<Content Include="assets\xskills\skills\survival.json" />
+		<Content Include="assets\xskills\skills\temporaladaptation.json" />
+		<Content Include="modinfo.json" />
+	</ItemGroup>
+	<ItemGroup>
+		<Reference Include="xlib">
+			<HintPath>..\xlib\bin\Debug\net10.0\xlib.dll</HintPath>
+		</Reference>
+	</ItemGroup>
+	<ItemGroup>
+		<Content Include="assets\xskills\patches\husbandry\animals.json" />
+		<Content Include="assets\xskills\blocktypes\cage.json" />
+		<Content Include="assets\xskills\effects\saturated.json" />
+		<Content Include="assets\xskills\recipes\grid\cage.json" />
+		<Content Include="assets\xskills\effects\effects.json" />
+		<Content Include="assets\xskills\lang\ja.json" />
+		<Content Include="assets\xskills\patches\cooking.json" />
+		<Content Include="assets\xskills\lang\es-419.json" />
+	</ItemGroup>
+	<ItemGroup>
+		<Folder Include="assets\xskills\shapes\item\" />
+		<Folder Include="src\Patches\Collabs\Combat\Taper4ik\" />
+	</ItemGroup>
+	<PropertyGroup>
+		<BaseOutputPath>./bin</BaseOutputPath>
+	</PropertyGroup>
+	<ProjectExtensions>
+		<VisualStudio>
+			<UserProperties assets_4xskills_4lang_4en_1json__JsonSchema="" />
+		</VisualStudio>
+	</ProjectExtensions>
+	<Target Name="PostRebuild" AfterTargets="Rebuild">
+		<PropertyGroup>
+			<ModName>$([System.Text.RegularExpressions.Regex]::Match('$([System.IO.File]::ReadAllText("$(ProjectDir)modinfo.json"))', '"name"\s*:\s*"([^"]+)"').Groups[1].Value)</ModName>
+			<ModVersion>$([System.Text.RegularExpressions.Regex]::Match('$([System.IO.File]::ReadAllText("$(ProjectDir)modinfo.json"))', '"version"\s*:\s*"([^"]+)"').Groups[1].Value)</ModVersion>
+
+			<ZipTempDir>$(TargetDir)ZipTemp</ZipTempDir>
+			<ZipOutDir>..\..\..\releases\$(ModName)</ZipOutDir>
+
+			<!-- Папка живой версии -->
+			<DevOutDir>..\..\..\releases\$(ModName)\dev $(ModName)</DevOutDir>
+
+		</PropertyGroup>
+
+		<MakeDir Directories="$(ZipOutDir)" Condition="!Exists('$(ZipOutDir)')" />
+
+		<RemoveDir Directories="$(ZipTempDir)" Condition="Exists('$(ZipTempDir)')" />
+		<MakeDir Directories="$(ZipTempDir)" />
+
+		<!-- Очистка dev копии -->
+		<RemoveDir Directories="$(DevOutDir)" Condition="Exists('$(DevOutDir)')" />
+		<MakeDir Directories="$(DevOutDir)" />
+
+		<ItemGroup>
+			<TargetFiles Include="$(TargetPath)" />
+			<TargetFiles Include="$(TargetDir)$(TargetName).pdb" Condition="Exists('$(TargetDir)$(TargetName).pdb')" />
+			<TargetFiles Include="$(TargetDir)$(TargetName).xml" Condition="Exists('$(TargetDir)$(TargetName).xml')" />
+		</ItemGroup>
+
+		<Copy SourceFiles="@(TargetFiles)" DestinationFolder="$(ZipTempDir)" />
+		<Copy SourceFiles="@(TargetFiles)" DestinationFolder="$(DevOutDir)" />
+
+		<ItemGroup>
+			<ProjectFiles Include="$(ProjectDir)modinfo.json" />
+			<ProjectFiles Include="$(ProjectDir)modicon.png" Condition="Exists('$(ProjectDir)modicon.png')" />
+		</ItemGroup>
+
+		<Copy SourceFiles="@(ProjectFiles)" DestinationFolder="$(ZipTempDir)" />
+		<Copy SourceFiles="@(ProjectFiles)" DestinationFolder="$(DevOutDir)" />
+
+		<ItemGroup>
+			<AssetFiles Include="$(ProjectDir)assets\**" />
+		</ItemGroup>
+
+		<Copy SourceFiles="@(AssetFiles)" DestinationFolder="$(ZipTempDir)\assets\%(RecursiveDir)" />
+		<Copy SourceFiles="@(AssetFiles)" DestinationFolder="$(DevOutDir)\assets\%(RecursiveDir)" />
+
+		<ZipDirectory SourceDirectory="$(ZipTempDir)" DestinationFile="$(ZipOutDir)\$(ModName) v$(ModVersion).zip" Overwrite="true" />
+
+		<RemoveDir Directories="$(ZipTempDir)" />
+
+	</Target>
+
+</Project>

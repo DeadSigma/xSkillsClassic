@@ -1,0 +1,1290 @@
+using ProtoBuf;
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Globalization;
+using Vintagestory.API.Common;
+using Vintagestory.API.Config;
+using Vintagestory.API.Datastructures;
+using Vintagestory.API.MathTools;
+using Vintagestory.API.Server;
+using Vintagestory.GameContent;
+using XLib.XEffects;
+using XLib.XLeveling;
+using Vintagestory.API.Util;
+
+namespace XSkills
+{
+    public static class PlayerExtensions
+    {
+        public static float OnAcquireTransitionSpeed(this IPlayer player, EnumTransitionType transType, ItemStack stack, float mulByConfig)
+        {
+            if (transType != EnumTransitionType.Perish) return 1.0f;
+            return player.Entity.Stats.GetBlended("perishMult");
+        }
+    }
+
+    public class Cooking : XSkill
+    {
+        //ability ids
+        public int CanteenCookId { get; private set; }
+        public int FastFoodId { get; private set; }
+        public int WellDoneId { get; private set; }
+        public int PreserverId { get; private set; }
+        public int DilutionId { get; private set; }
+        public int RefinedDilutionId { get; private set; }
+        public int DesalinateId { get; private set; }
+        public int SaltyBackpackId { get; private set; }
+        public int GourmetId { get; private set; }
+        public int HappyMealId { get; private set; }
+        public int JuicerId { get; private set; }
+        public int EggTimerId { get; private set; }
+        public int BurntMasteryId { get; private set; }
+
+        /// <summary>Базовое насыщение на литр для жидкостей без nutritionPropsPerLitre (вода, рассол).</summary>
+        private const float LiquidBaseSatiety = 50.0f;
+
+        /// <summary>Stores the Well Done shelf-life bonus calculated before saucepan cooking completes.</summary>
+        public const string WellDoneShelfLifeAttribute = "xskillsWellDoneShelfLifeBonus";
+
+        /// <summary>Marks that a saucepan operation has a Well Done snapshot, including a zero-value snapshot.</summary>
+        public const string WellDoneSnapshotAttribute = "xskillsWellDoneSnapshotReady";
+
+        [ThreadStatic]
+        private static ItemSlot pendingPreviousOutputSlot;
+
+        [ThreadStatic]
+        private static ItemStack pendingPreviousOutputStack;
+
+        /// <summary>
+        /// Supplies a pre-smelt output snapshot to legacy cooking helpers that still call
+        /// the six-argument ApplyAbilities overload. The value is thread-local and is
+        /// consumed by the next matching call.
+        /// </summary>
+        internal static void SetPendingPreviousOutput(ItemSlot outputSlot, ItemStack previousOutputStack)
+        {
+            pendingPreviousOutputSlot = outputSlot;
+            pendingPreviousOutputStack = previousOutputStack;
+        }
+
+        internal static void ClearPendingPreviousOutput(ItemSlot outputSlot)
+        {
+            if (!ReferenceEquals(pendingPreviousOutputSlot, outputSlot)) return;
+
+            pendingPreviousOutputSlot = null;
+            pendingPreviousOutputStack = null;
+        }
+
+        private static ItemStack TakePendingPreviousOutput(ItemSlot outputSlot)
+        {
+            if (!ReferenceEquals(pendingPreviousOutputSlot, outputSlot)) return null;
+
+            ItemStack previousOutputStack = pendingPreviousOutputStack;
+            pendingPreviousOutputSlot = null;
+            pendingPreviousOutputStack = null;
+            return previousOutputStack;
+        }
+
+        private static bool SameCollectible(ItemStack first, ItemStack second)
+        {
+            if (first?.Collectible == null || second?.Collectible == null) return false;
+            return ReferenceEquals(first.Collectible, second.Collectible)
+                || first.Collectible.Code?.Equals(second.Collectible.Code) == true;
+        }
+
+        /// <summary>
+        /// Возвращает неизменённое значение свежести в часах, заданное непосредственно для предмета.
+        /// Используется как фиксированная базовая величина, чтобы Well Done никогда не мог повторно умножить собственный результат.
+        /// </summary>
+
+        private static float[] GetBaseFreshHours(IWorldAccessor world, ItemStack stack)
+        {
+            if (world == null || stack?.Collectible == null) return null;
+
+            TransitionableProperties[] props =
+                stack.Collectible.GetTransitionableProperties(world, stack, null);
+
+            if (props == null || props.Length == 0) return null;
+
+            float[] baseFreshHours = new float[props.Length];
+            for (int index = 0; index < props.Length; index++)
+            {
+                baseFreshHours[index] = props[index]?.FreshHours?.avg ?? 0.0f;
+            }
+
+            return baseFreshHours;
+        }
+
+        private static ITreeAttribute GetOrCreateTransitionState(IWorldAccessor world, ItemStack stack)
+        {
+            if (world == null || stack?.Collectible == null) return null;
+
+            ITreeAttribute transitionState =
+                (stack.Attributes as TreeAttribute)?.GetTreeAttribute("transitionstate");
+
+            if (transitionState == null && (stack.Collectible.TransitionableProps?.Length ?? 0) > 0)
+            {
+                stack.Collectible.UpdateAndGetTransitionStates(world, new DummySlot(stack));
+                transitionState =
+                    (stack.Attributes as TreeAttribute)?.GetTreeAttribute("transitionstate");
+            }
+
+            return transitionState;
+        }
+
+
+
+        private static ItemStack FindPreviousContentStack(
+            ItemStack currentStack,
+            ItemStack[] previousContentStacks,
+            bool[] usedPreviousStacks,
+            int preferredIndex)
+        {
+            if (currentStack == null || previousContentStacks == null) return null;
+
+            if (preferredIndex >= 0
+                && preferredIndex < previousContentStacks.Length
+                && !usedPreviousStacks[preferredIndex]
+                && SameCollectible(currentStack, previousContentStacks[preferredIndex]))
+            {
+                usedPreviousStacks[preferredIndex] = true;
+                return previousContentStacks[preferredIndex];
+            }
+
+            for (int index = 0; index < previousContentStacks.Length; index++)
+            {
+                if (usedPreviousStacks[index]
+                    || !SameCollectible(currentStack, previousContentStacks[index]))
+                {
+                    continue;
+                }
+
+                usedPreviousStacks[index] = true;
+                return previousContentStacks[index];
+            }
+
+            return null;
+        }
+
+        private static float GetOutputQuantity(IWorldAccessor world, ItemStack stack)
+        {
+            if (world == null || stack?.Collectible == null) return 0.0f;
+
+            if (stack.Collectible is BlockLiquidContainerBase liquidContainer)
+            {
+                return Math.Max(0.0f, liquidContainer.GetCurrentLitres(stack));
+            }
+
+            if (stack.Collectible is IBlockMealContainer mealContainer)
+            {
+                return Math.Max(0.0f, mealContainer.GetQuantityServings(world, stack));
+            }
+
+            return Math.Max(0, stack.StackSize);
+        }
+
+        /// <summary>
+        /// Applies Well Done only to the quantity produced by the current operation.
+        /// Existing output keeps its stored shelf-life duration, so repeatedly adding
+        /// products to the output slot cannot multiply the old stack again.
+        /// </summary>
+        private void ApplyWellDoneShelfLife(
+            ItemStack outputStack,
+            ItemStack[] contentStacks,
+            ItemStack previousOutputStack,
+            IWorldAccessor world,
+            float shelfLifeBonus)
+        {
+            if (shelfLifeBonus <= 0.0f
+                || outputStack == null
+                || contentStacks == null
+                || contentStacks.Length == 0)
+            {
+                return;
+            }
+
+            float shelfLifeMultiplier = 1.0f + shelfLifeBonus;
+            bool sameOutputType = SameCollectible(outputStack, previousOutputStack);
+
+            ItemStack[] previousContentStacks = sameOutputType
+                ? ContentStacks(previousOutputStack, world)
+                : null;
+
+            bool[] usedPreviousStacks = previousContentStacks == null
+                ? null
+                : new bool[previousContentStacks.Length];
+
+            bool useContainerQuantity =
+                outputStack.Collectible is IBlockMealContainer
+                || outputStack.Collectible is BlockLiquidContainerBase;
+
+            float currentContainerQuantity = useContainerQuantity
+                ? GetOutputQuantity(world, outputStack)
+                : 0.0f;
+
+            float previousContainerQuantity = useContainerQuantity && sameOutputType
+                ? GetOutputQuantity(world, previousOutputStack)
+                : 0.0f;
+
+            for (int stackIndex = 0; stackIndex < contentStacks.Length; stackIndex++)
+            {
+                ItemStack currentStack = contentStacks[stackIndex];
+                if (currentStack?.Collectible == null) continue;
+
+                ITreeAttribute currentTransitionState =
+                    GetOrCreateTransitionState(world, currentStack);
+
+                FloatArrayAttribute currentFreshHours =
+                    currentTransitionState?["freshHours"] as FloatArrayAttribute;
+
+                if (currentFreshHours?.value == null) continue;
+
+                ItemStack previousStack = FindPreviousContentStack(
+                    currentStack,
+                    previousContentStacks,
+                    usedPreviousStacks,
+                    stackIndex
+                );
+
+                float totalWeight;
+                float previousWeight;
+
+                if (useContainerQuantity && currentContainerQuantity > 0.0f)
+                {
+                    totalWeight = currentContainerQuantity;
+                    previousWeight = previousStack == null
+                        ? 0.0f
+                        : Math.Min(previousContainerQuantity, totalWeight);
+                }
+                else
+                {
+                    totalWeight = Math.Max(0, currentStack.StackSize);
+                    previousWeight = previousStack == null
+                        ? 0.0f
+                        : Math.Min(Math.Max(0, previousStack.StackSize), totalWeight);
+                }
+
+                float producedWeight = totalWeight - previousWeight;
+                if (totalWeight <= 0.0f || producedWeight <= 0.0f) continue;
+
+                ITreeAttribute previousTransitionState = previousStack == null
+                    ? null
+                    : GetOrCreateTransitionState(world, previousStack);
+
+                FloatArrayAttribute previousFreshHours =
+                    previousTransitionState?["freshHours"] as FloatArrayAttribute;
+
+                // база берётся из определения предмета - иначе бонус накручивается сам на себя
+                float[] baseFreshHours = GetBaseFreshHours(world, currentStack);
+
+                for (int transitionIndex = 0;
+                     transitionIndex < currentFreshHours.value.Length;
+                     transitionIndex++)
+                {
+                    float currentFresh = currentFreshHours.value[transitionIndex];
+                    if (currentFresh <= 0.0f || !float.IsFinite(currentFresh)) continue;
+
+                    float baseFresh = baseFreshHours != null
+                        && transitionIndex < baseFreshHours.Length
+                        && baseFreshHours[transitionIndex] > 0.0f
+                        && float.IsFinite(baseFreshHours[transitionIndex])
+                            ? baseFreshHours[transitionIndex]
+                            : currentFresh;
+
+                    float boostedProducedFresh = baseFresh * shelfLifeMultiplier;
+
+                    if (previousWeight <= 0.0f)
+                    {
+                        currentFreshHours.value[transitionIndex] = boostedProducedFresh;
+                        continue;
+                    }
+
+                    float previousFresh = previousFreshHours?.value != null
+                        && transitionIndex < previousFreshHours.value.Length
+                        && previousFreshHours.value[transitionIndex] > 0.0f
+                        && float.IsFinite(previousFreshHours.value[transitionIndex])
+                            ? previousFreshHours.value[transitionIndex]
+                            : currentFresh;
+
+                    currentFreshHours.value[transitionIndex] =
+                        (previousFresh * previousWeight
+                         + boostedProducedFresh * producedWeight)
+                        / totalWeight;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Returns whether Dilution should treat the supplied stack as food.
+        /// Supports normal nutrition, liquid nutrition per litre, and meal-only nutrition used by Expanded Foods.
+        /// </summary>
+        private static bool IsFoodForDilution(ItemStack stack)
+        {
+            CollectibleObject collectible = stack?.Collectible;
+            if (collectible == null) return false;
+
+            if ((collectible.NutritionProps?.Satiety ?? 0.0f) > 0.0f)
+            {
+                return true;
+            }
+
+            WaterTightContainableProps liquidProps = BlockLiquidContainerBase.GetContainableProps(stack);
+            if ((liquidProps?.NutritionPropsPerLitre?.Satiety ?? 0.0f) > 0.0f)
+            {
+                return true;
+            }
+
+            JsonObject attributes = collectible.Attributes;
+            return attributes != null &&
+                   (attributes["nutritionPropsWhenInMeal"].Exists ||
+                    attributes["nutritionPropsWhenInMealByType"].Exists);
+        }
+
+        /// <summary>
+        /// Scales a stack while preserving fractional Dilution output through probabilistic rounding.
+        /// </summary>
+        private static int ScaleStackSizeWithRandomRounding(int currentSize, float multiplier, Random random)
+        {
+            if (currentSize <= 0 || multiplier <= 1.0f || random == null) return currentSize;
+
+            float scaledSize = currentSize * multiplier;
+            int roundedSize = (int)Math.Floor(scaledSize);
+            float remainder = scaledSize - roundedSize;
+
+            // Random rounding preserves the configured average bonus for small liquid batches.
+            if (remainder > 0.0f && random.NextDouble() < remainder)
+            {
+                roundedSize++;
+            }
+
+            return Math.Max(currentSize, roundedSize);
+        }
+
+        /// <summary>
+        /// Reads the Well Done values that should be recorded before a cooking operation completes.
+        /// </summary>
+        public bool TryGetWellDoneBonuses(IPlayer player, out float shelfLifeBonus, out float cookingTimeBonus)
+        {
+            shelfLifeBonus = 0.0f;
+            cookingTimeBonus = 0.0f;
+
+            PlayerSkill skill = player?.Entity?.GetBehavior<PlayerSkillSet>()?[this.Id];
+            PlayerAbility ability = skill?[this.WellDoneId];
+
+            if (ability == null || ability.Tier <= 0) return false;
+
+            shelfLifeBonus = Math.Max(0.0f, ability.SkillDependentFValue());
+            cookingTimeBonus = Math.Max(0.0f, ability.FValue(3));
+            return shelfLifeBonus > 0.0f || cookingTimeBonus > 0.0f;
+        }
+
+        /// <summary>
+        /// Calculates the combined Fast Food and Well Done duration multiplier for a player.
+        /// </summary>
+        public float GetCookingTimeMultiplier(IPlayer player)
+        {
+            PlayerSkill skill = player?.Entity?.GetBehavior<PlayerSkillSet>()?[this.Id];
+            if (skill == null) return 1.0f;
+
+            PlayerAbility fastFood = skill[this.FastFoodId];
+            PlayerAbility wellDone = skill[this.WellDoneId];
+
+            float fastFoodMultiplier = fastFood?.Tier > 0
+                ? 1.0f - fastFood.SkillDependentFValue()
+                : 1.0f;
+
+            float wellDoneMultiplier = wellDone?.Tier > 0
+                ? 1.0f + wellDone.FValue(3)
+                : 1.0f;
+
+            return Math.Max(0.05f, fastFoodMultiplier * wellDoneMultiplier);
+        }
+
+        protected Dictionary<CookingRecipeStack, List<CookingRecipeStack>> resolvedRecipeStacks = new();
+        public Cooking(ICoreAPI api) : base("cooking", "xskills:skill-cooking", "xskills:group-processing")
+        {
+            (XLeveling.Instance(api))?.RegisterSkill(this);
+            this.Config = new CookingSkillConfig();
+
+            // cook more servings at once
+            // 0: value
+            CanteenCookId = this.AddAbility(new Ability(
+                "canteencook",
+                "xskills:ability-canteencook",
+                "xskills:abilitydesc-canteencook",
+                1, 3, new int[] { 34, 67, 100 }));
+
+            // cook faster
+            // 0: base value
+            // 1: value per level
+            // 2: max value
+            FastFoodId = this.AddAbility(new Ability(
+                "fastfood",
+                "xskills:ability-fastfood",
+                "xskills:abilitydesc-fastfood",
+                1, 3, new int[] { 10, 1, 20, 20, 2, 40, 20, 2, 60 }));
+
+            //increases the shelf life of your cooked servings
+            // 0: base value
+            // 1: value per level
+            // 2: max value
+            // 3: increased cooking time
+            WellDoneId = this.AddAbility(new Ability(
+                "welldone",
+                "xskills:ability-welldone",
+                "xskills:abilitydesc-welldone",
+                1, 3, new int[] { 5, 1, 15, 20, 10, 2, 30, 20, 10, 2, 50, 20 }));
+
+            //increases the number of servings you gain when cooking
+            // 0: base value
+            // 1: value per level
+            // 2: max value
+            DilutionId = this.AddAbility(new Ability(
+                "dilution",
+                "xskills:ability-dilution",
+                "xskills:abilitydesc-dilution",
+                3, 3, new int[] { 10, 1, 20, 20, 1, 30, 20, 1, 40 }));
+
+            // you can cook water into salt
+            // 0: primary result
+            // 1: secondary result
+            DesalinateId = this.AddAbility(new Ability(
+                "desalinate",
+                "xskills:ability-desalinate",
+                "xskills:abilitydesc-desalinate",
+                3, 3, new int[] { 1, 1, 2, 1, 4, 2 }));
+
+            // ingredients in backpack perish slower
+            // 0: water needed per salt
+            SaltyBackpackId = this.AddAbility(new Ability(
+                "saltybackpack",
+                "xskills:ability-saltybackpack",
+                "xskills:abilitydesc-saltybackpack",
+                3, 3, new int[] { 75, 66, 50 }));
+
+            // enables quality for food
+            // 0: base value
+            // 1: max value
+            GourmetId = this.AddAbility(new Ability(
+                "gourmet",
+                "xskills:ability-gourmet",
+                "xskills:abilitydesc-gourmet",
+                3, 2, new int[] { 1, 5, 2, 10 }));
+
+            // profession
+            // 0: base value
+            SpecialisationID = this.AddAbility(new Ability(
+                "chef",
+                "xskills:ability-chef",
+                "xskills:abilitydesc-chef",
+                5, 1, new int[] { 40 }));
+
+            // chance to add a random ingredient
+            // 0: base value
+            // 1: value per level
+            // 2: max value
+            HappyMealId = this.AddAbility(new Ability(
+                  "happymeal",
+                  "xskills:ability-happymeal",
+                  "xskills:abilitydesc-happymeal",
+                  5, 4, new int[] { 10, 1, 20, 20, 2, 40, 20, 2, 60, 20, 2, 80 }));
+
+            // Increases the amount of juice for every fruit
+            // 0: increased amount
+            JuicerId = this.AddAbility(new Ability(
+                "juicer",
+                "xskills:ability-juicer",
+                "xskills:abilitydesc-juicer",
+                6, 2, new int[] { 33, 60 }));
+
+            // sends a message to the player when cooking a meal was finished
+            EggTimerId = this.AddAbility(new Ability(
+                "eggtimer",
+                "xskills:ability-eggtimer",
+                "xskills:abilitydesc-eggtimer",
+                8));
+
+            //Позволяет перку Dilution распространяться на несъедобные продукты
+            RefinedDilutionId = this.AddAbility(new Ability(
+                "refineddilution",
+                "xskills:ability-refineddilution",
+                "xskills:abilitydesc-refineddilution",
+                5));
+
+            // обугленная еда получает такое же качество, как нормально приготовленная
+            BurntMasteryId = this.AddAbility(new Ability(
+                "burntmastery",
+                "xskills:ability-burntmastery",
+                "xskills:abilitydesc-burntmastery",
+                8));
+
+            this[SaltyBackpackId].OnPlayerAbilityTierChanged += OnSaltyBackpack;
+
+            this.ExperienceEquation = QuadraticEquation;
+            this.ExpBase = 40;
+            this.ExpMult = 10.0f;
+            this.ExpEquationValue = 0.8f;
+
+            CookingRecipe.NamingRegistry["lime"] = new XskillsCookingRecipeNames();
+            CookingRecipe.NamingRegistry["salt"] = new XskillsCookingRecipeNames();
+        }
+
+        public static void ApplyQuality(float quality, float eaten, float temperature, EnumFoodCategory food0, EnumFoodCategory food1, EntityAgent byEntity)
+        {
+            if (quality <= 0.0f || float.IsNaN(quality) || byEntity.Api.Side == EnumAppSide.Client) return;
+            if (eaten <= 0.0f) return;
+            float duration = eaten * 600.0f;
+
+            string effectName;
+            if (food0 == EnumFoodCategory.Fruit)
+            {
+                effectName = "saturated-hot";
+            }
+            else if (food0 == EnumFoodCategory.Vegetable)
+            {
+                effectName = "saturated-miningSpeed";
+            }
+            else if (food0 == EnumFoodCategory.Protein)
+            {
+                effectName = "saturated-health";
+            }
+            else if (food0 == EnumFoodCategory.Grain)
+            {
+                effectName = "saturated-hungerrate";
+            }
+            else if (food0 == EnumFoodCategory.Dairy)
+            {
+                effectName = "saturated-expMult";
+            }
+            else return;
+
+            XEffectsSystem effectSystem = byEntity?.Api.ModLoader.GetModSystem<XEffectsSystem>();
+            if (effectSystem == null) return;
+            Effect effect = effectSystem.CreateEffect(effectName);
+            if (effect != null)
+            {
+                effect.Duration *= duration;
+                effect.Update(effect.Intensity * quality);
+                byEntity.AddEffect(effect);
+            }
+
+            if (temperature >= 50.0f)
+            {
+                effectName = "saturated-heated";
+                effect = effectSystem.CreateEffect(effectName);
+                if (effect != null)
+                {
+                    effect.Duration *= duration;
+                    effect.Update(effect.Intensity * quality);
+                    byEntity.AddEffect(effect);
+                }
+            }
+        }
+
+        public ItemStack[] ContentStacks(ItemStack itemStack, IWorldAccessor world)
+        {
+            ItemStack[] contentStacks;
+            IBlockMealContainer mealContainer = (itemStack.Collectible as IBlockMealContainer);
+            ItemStack liquidStack = (itemStack.Collectible as BlockLiquidContainerBase)?.GetContent(itemStack);
+
+            ITreeAttribute contentsAttr = itemStack.Attributes?.GetTreeAttribute("contents");
+            if (contentsAttr != null)
+            {
+                List<ItemStack> stacks = new List<ItemStack>();
+                foreach (var kvp in contentsAttr)
+                {
+                    ItemstackAttribute attr = kvp.Value as ItemstackAttribute;
+                    if (attr != null && attr.value != null)
+                    {
+                        ItemStack stack = attr.value;
+                        if (stack.Collectible == null) stack.ResolveBlockOrItem(world);
+                        stacks.Add(stack);
+                    }
+                }
+                if (stacks.Count > 0) return stacks.ToArray();
+            }
+
+            if (mealContainer != null)
+            {
+                contentStacks = mealContainer.GetContents(world, itemStack);
+            }
+            else if (liquidStack != null)
+            {
+                contentStacks = new ItemStack[] { liquidStack };
+            }
+            else
+            {
+                contentStacks = new ItemStack[] { itemStack };
+            }
+            return contentStacks;
+        }
+
+        public float IngredientDiversity(ItemStack itemStack, ItemStack[] contentStacks, IWorldAccessor world, out int ingredientCount)
+        {
+            ingredientCount = 0;
+            int substract = 1;
+            if (itemStack == null) return 0.0f;
+            if (contentStacks == null) contentStacks = ContentStacks(itemStack, world);
+
+            Dictionary<CollectibleObject, int> usedIngredients = new Dictionary<CollectibleObject, int>();
+            foreach (ItemStack ingridient in contentStacks)
+            {
+                if (ingridient == null) continue;
+                ingredientCount++;
+
+                if (!usedIngredients.TryGetValue(ingridient.Collectible, out int value)) value = 0;
+                usedIngredients[ingridient.Collectible] = value + 1;
+            }
+
+            //expanded foods
+            string[] madeWith = (itemStack.Attributes["madeWith"] as StringArrayAttribute)?.value;
+            Dictionary<string, int> madeWithIngredients = new Dictionary<string, int>();
+            if (madeWith?.Length > 0)
+            {
+                substract++;
+                ingredientCount--;
+                foreach (string ingredient in madeWith)
+                {
+                    if (ingredient == null) continue;
+                    ingredientCount++;
+
+                    if (!madeWithIngredients.TryGetValue(ingredient, out int value)) value = 0;
+                    madeWithIngredients[ingredient] = value + 1;
+                }
+            }
+            return 1.0f + (usedIngredients.Count + madeWithIngredients.Count - substract) * 0.1f;
+        }
+
+        public float BakeRange(ItemStack outputStack, ItemStack sourceStack, out bool firstStage)
+        {
+            BakingProperties bakingProperties = BakingProperties.ReadFrom(outputStack);
+            BakingProperties bakingProperties2 = sourceStack != null ? BakingProperties.ReadFrom(sourceStack) : null;
+            float bakeRange = 1.0f;
+            firstStage = true;
+            if (bakingProperties2 == null) return bakeRange;
+            if (bakingProperties == null)
+            {
+                bakeRange = GameMath.Clamp(1.0f - bakingProperties2.LevelFrom, 0.0f, 1.0f);
+            }
+            else
+            {
+                bakeRange = Math.Min(bakingProperties.LevelFrom - bakingProperties2.LevelFrom, 1.0f);
+            }
+            firstStage = bakingProperties2.LevelFrom <= 0.0f;
+            return Math.Abs(bakeRange);
+        }
+
+        public bool FinishedCooking(ItemSlot outputSlot)
+        {
+            if ((outputSlot.Inventory as InventorySmelting)?[1].Empty ?? false) return true;
+            foreach (ItemSlot slot in outputSlot.Inventory)
+            {
+                if (slot.Empty) continue;
+
+                BakingProperties bakingProperties = BakingProperties.ReadFrom(slot.Itemstack);
+                if (bakingProperties != null)
+                {
+                    if (slot == outputSlot)
+                    {
+                        if (bakingProperties.ResultCode?.Contains("charred") ?? true)
+                        {
+                            return true;
+                        }
+                        else return false;
+                    }
+                    else continue;
+                }
+
+                if (slot == outputSlot) continue;
+                if (slot.Itemstack.Collectible.CombustibleProps?.BurnDuration > 0.0f) continue;
+                return false;
+            }
+            return true;
+        }
+
+        public void FreshnessAndQuality(ItemStack[] sourceStacks, out float freshness, out float quality)
+        {
+            freshness = 1.0f;
+            quality = 0.0f;
+            int ingredientCount = 0;
+
+            foreach (ItemStack stack in sourceStacks)
+            {
+                ITreeAttribute attr = (stack?.Attributes as TreeAttribute)?.GetTreeAttribute("transitionstate");
+                if (attr != null)
+                {
+                    FloatArrayAttribute freshHoursAttribute = attr["freshHours"] as FloatArrayAttribute;
+                    FloatArrayAttribute transitionedHoursAttribute = attr["transitionedHours"] as FloatArrayAttribute;
+                    if (freshHoursAttribute == null || transitionedHoursAttribute == null) continue;
+
+                    for (int ii = 0; ii < freshHoursAttribute.value.Length; ++ii)
+                    {
+                        if (freshHoursAttribute.value[ii] != 0.0f)
+                        {
+                            freshness *= Math.Clamp(1.0f - transitionedHoursAttribute.value[ii] / freshHoursAttribute.value[ii], 0.0f, 1.0f);
+                            break;
+                        }
+                    }
+                }
+
+                int count = (stack.Attributes["madeWith"] as StringArrayAttribute)?.value.Length ?? 1;
+                quality += stack.Attributes.GetFloat("quality") * count;
+                ingredientCount += count;
+            }
+            quality /= ingredientCount;
+        }
+
+        //  имя уникальное ибо внешние моды  ищут метод через GetMethod (name, flags) без списка типов
+        public void ApplyAbilities(
+            ItemSlot outputSlot,
+            IPlayer player,
+            float oldQuality,
+            float cookedAmount = 1.0f,
+            ItemStack[] sourceStacks = null,
+            float expMult = 1.0f)
+        {
+            ApplyAbilitiesCore(
+                outputSlot,
+                player,
+                oldQuality,
+                cookedAmount,
+                sourceStacks,
+                expMult,
+                TakePendingPreviousOutput(outputSlot)
+            );
+        }
+
+        public void ApplyAbilitiesCore(
+            ItemSlot outputSlot,
+            IPlayer player,
+            float oldQuality,
+            float cookedAmount,
+            ItemStack[] sourceStacks,
+            float expMult,
+            ItemStack previousOutputStack)
+        {
+            ItemStack outputStack = outputSlot?.Itemstack;
+            if (outputStack == null || player == null) return;
+            ItemStack[] contentStacks;
+            ItemStack sourceStack = sourceStacks?.Length == 1 ? sourceStacks[0] : null;
+
+            PlayerSkill skill = player.Entity.GetBehavior<PlayerSkillSet>()?[this.Id];
+            if (skill == null) return;
+            IWorldAccessor world = player.Entity?.World;
+            if (world == null) return;
+
+            contentStacks = ContentStacks(outputStack, world);
+            if (contentStacks == null || contentStacks.Length < 1) return;
+
+            float bakeRange = BakeRange(outputStack, sourceStack, out bool firstStage);
+            if (bakeRange < 0.99f) bakeRange *= 1.5f;
+
+            float satiety = outputStack.Collectible.NutritionProps?.Satiety ?? 0.0f;
+            float servings = (float)outputStack.Attributes.GetDecimal("quantityServings", cookedAmount);
+            bool charred = (sourceStack?.Collectible.NutritionProps?.Satiety ?? 0.0f) > satiety || outputStack.Collectible.Code.Path.Contains("charred");
+            // сухари и им подобное пересушены by design - штраф не применяем никогда
+            // перк снимает штраф для всего остального, но обугливание и урезанный опыт остаются
+            bool charredQuality = charred
+                && !IsQualityExempt(outputStack)
+                && (skill[this.BurntMasteryId]?.Tier ?? 0) <= 0;
+            float ingredientDiversity = IngredientDiversity(outputStack, contentStacks, world, out int ingredientCount);
+            bool expandedFood = outputStack.Attributes.HasAttribute("madeWith");
+            IBlockMealContainer mealContainer = (outputStack.Collectible as IBlockMealContainer);
+            BlockLiquidContainerBase liquidContainer = (outputStack.Collectible as BlockLiquidContainerBase);
+
+            // Берём насыщение из nutritionPropsPerLitre содержимого, а порции - из литража
+            if (liquidContainer != null)
+            {
+                float litres = liquidContainer.GetCurrentLitres(outputStack);
+                if (litres > 0.0f) servings = litres;
+
+                if (satiety <= 0.0f)
+                {
+                    foreach (ItemStack contentStack in contentStacks)
+                    {
+                        if (contentStack == null) continue;
+                        WaterTightContainableProps wprops = BlockLiquidContainerBase.GetContainableProps(contentStack);
+                        float contentSatiety = wprops?.NutritionPropsPerLitre?.Satiety
+                                               ?? contentStack.Collectible?.NutritionProps?.Satiety ?? 0.0f;
+                        if (contentSatiety > satiety) satiety = contentSatiety;
+                    }
+                }
+
+                // Вода/морская вода не имеют насыщения вовсе - без floor'а выварка соли
+                // и кипячение воды так и останутся без опыта.
+                if (satiety <= 0.0f) satiety = LiquidBaseSatiety;
+            }
+
+            //experience
+            float exp = expMult * (Config as CookingSkillConfig).expBase;
+            if (ingredientCount == 1)
+            {
+                exp *= satiety * servings * bakeRange;
+            }
+            else
+            {
+                exp *= 225.0f * ingredientCount * ingredientDiversity * servings * bakeRange;
+            }
+
+            if (!charred)
+            {
+                if ((!expandedFood || satiety > 0.0f))
+                {
+                    skill.AddExperience(exp);
+                }
+            }
+            else if (firstStage)
+            {
+                skill.AddExperience(exp * 0.5f);
+            }
+
+            //eggtimer
+            PlayerAbility playerAbility = skill[this.EggTimerId];
+            if (playerAbility?.Tier > 0)
+            {
+                BlockPos pos = outputSlot.Inventory.Pos;
+                Block block = pos != null ? world.BulkBlockAccessor.GetBlock(pos) : null;
+
+                if (block != null && FinishedCooking(outputSlot))
+                {
+                    double now = world.Calendar.TotalHours;
+                    double lastMsg = player.Entity.Attributes.GetDouble("xskillsCookingMsg");
+
+                    if (now > lastMsg + 0.333)
+                    {
+                        player.Entity.Attributes.SetDouble("xskillsCookingMsg", now);
+                        world.PlaySoundFor(new AssetLocation("sounds/tutorialstepsuccess.ogg"), player);
+
+                        string msg = Lang.Get("xskills:cooking-finished", block.GetPlacedBlockName(world, pos) + " (" + pos.X + ", " + pos.X + pos.Y + ", " + pos.Z + ")");
+                        (player as IServerPlayer)?.SendMessage(0, msg, EnumChatType.Notification);
+                    }
+                }
+            }
+
+            // dilution
+            playerAbility = skill[this.DilutionId];
+            float scaledCooked = servings;
+            int totalCooked = (int)cookedAmount;
+
+            if (playerAbility?.Tier > 0 && firstStage && !outputStack.Collectible.Code.Path.Equals("glueportion-pitch-hot"))
+            {
+                scaledCooked = servings * (1.0f + playerAbility.SkillDependentFValue());
+
+                if (liquidContainer != null)
+                {
+                    float multiplier = 1.0f + playerAbility.SkillDependentFValue();
+                    bool refinedDilution = (skill[this.RefinedDilutionId]?.Tier ?? 0) > 0;
+
+                    foreach (ItemStack stack in contentStacks)
+                    {
+                        if (stack?.Collectible == null) continue;
+
+                        // Normal Dilution affects food liquids. Refined Dilution also allows non-edible processing liquids.
+                        if (!IsFoodForDilution(stack) && !refinedDilution) continue;
+
+                        stack.StackSize = ScaleStackSizeWithRandomRounding(
+                            stack.StackSize,
+                            multiplier,
+                            world.Rand
+                        );
+                    }
+                }
+                else if (mealContainer == null || mealContainer is BlockPie)
+                {
+                    if (outputStack.Collectible.NutritionProps != null || mealContainer is BlockPie ||
+                          (skill[this.RefinedDilutionId]?.Tier ?? 0) > 0)
+                    {
+                        float rel = scaledCooked - (int)scaledCooked;
+                        totalCooked = (int)scaledCooked + (world.Rand.NextDouble() < rel ? 1 : 0);
+                        if (outputStack.StackSize > cookedAmount)
+                            outputStack.StackSize += totalCooked - (int)(cookedAmount + 0.25f);
+                        else
+                            outputStack.StackSize = totalCooked;
+                    }
+                }
+                else
+                {
+                    // Теперь этот код сработает корректно для горшков/котлов (mealContainer)
+                    mealContainer.SetQuantityServings(world, outputStack, scaledCooked);
+                }
+            }
+
+            //desalinate
+            playerAbility = skill[this.DesalinateId];
+            if (playerAbility != null && playerAbility.Tier > 0 && outputStack?.Collectible?.Code != null && (
+                outputStack.Collectible.Code.Path.Equals("salt") ||
+                outputStack.Collectible.Code.Path.Equals("lime")))
+            {
+                int size0 = outputStack.StackSize * playerAbility.Value(0);
+
+                int size1 = outputStack.StackSize * playerAbility.Value(1);
+                if (size1 <= 0) size1 = (int)(outputStack.StackSize * playerAbility.FValue(1));
+                if (size1 <= 0) size1 = 1;
+
+                // Умножение соли
+                outputStack.StackSize = size0;
+                if (outputSlot != null && outputSlot.Itemstack != null)
+                {
+                    outputSlot.Itemstack.StackSize = size0;
+                }
+
+                if (outputStack.StackSize == 0)
+                {
+                    outputStack = null;
+                    if (outputSlot != null) outputSlot.Itemstack = null;
+                }
+
+                // Ищем пустой слот ВНУТРИ котелка
+                ItemSlot bonusSlot = null;
+                InventoryBase inv = outputSlot?.Inventory as InventoryBase;
+
+                if (inv != null)
+                {
+                    // Пропускаем слоты 0, 1, 2 
+                    for (int i = 3; i < inv.Count; i++)
+                    {
+                        if (inv[i].Itemstack == null || inv[i].Itemstack.StackSize == 0)
+                        {
+                            bonusSlot = inv[i];
+                            break;
+                        }
+                    }
+                }
+
+                // Выдаем известь в найденный пустой слот
+                if (bonusSlot != null && size1 > 0 && outputStack != null)
+                {
+                    string itemName = outputStack.Collectible.Code.Path.Equals("salt") ? "game:lime" : "game:salt";
+                    AssetLocation itemLoc = new AssetLocation(itemName);
+
+                    CollectibleObject bonusCollectible = world.GetItem(itemLoc) as CollectibleObject ?? world.GetBlock(itemLoc);
+
+                    if (bonusCollectible != null)
+                    {
+                        bonusSlot.Itemstack = new ItemStack(bonusCollectible, size1);
+                        bonusSlot.MarkDirty();
+                    }
+                }
+
+                outputSlot?.MarkDirty();
+            }
+            if (outputStack == null) return;
+
+            if (mealContainer != null)
+            {
+                //Happy meal
+                playerAbility = skill[this.HappyMealId];
+                if (playerAbility?.SkillDependentFValue() >= world.Rand.NextDouble() && mealContainer is BlockCookedContainer)
+                {
+                    ItemStack[] newStacks = new ItemStack[contentStacks.Length + 1];
+                    int ii = 0;
+                    int size = 0;
+                    ITreeAttribute attr = null;
+                    for (; ii < contentStacks.Length; ii++)
+                    {
+                        newStacks[ii] = contentStacks[ii];
+                        size += contentStacks[ii]?.StackSize ?? 0;
+
+                        if (attr != null) continue;
+                        attr = (contentStacks[ii]?.Attributes as TreeAttribute)?.GetTreeAttribute("transitionstate");
+                        if (attr?.HasAttribute("freshHours") ?? false)
+                        {
+                            attr = attr.Clone();
+                        }
+                        else attr = null;
+                    }
+                    size /= contentStacks.Length;
+
+                    CookingRecipe recipe = (mealContainer as BlockCookedContainer)?.GetCookingRecipe(world, outputStack) ?? (mealContainer as BlockMeal)?.GetCookingRecipe(world, outputStack);
+                    if (recipe != null)
+                    {
+                        // Если уровень 4, то allowBad = false
+                        bool allowBad = playerAbility.Tier < 4;
+
+                        ItemStack stack = GetMissingIngredient(contentStacks, recipe, world, allowBad);
+
+                        // Проверяем, что ингредиент нашелся, и только потом работаем с ним
+                        if (stack != null)
+                        {
+                            stack.StackSize = size;
+                            if (attr != null) stack.Attributes["transitionstate"] = attr;
+                            newStacks[ii] = stack;
+                            mealContainer.SetContents(recipe.Code, outputStack, newStacks, mealContainer.GetQuantityServings(world, outputStack));
+                        }
+                    }
+                }
+            }
+
+            //well done
+            playerAbility = skill[this.WellDoneId];
+
+            // Saucepan cooking records the bonus before completion. Other cooking paths keep the existing completion-time behavior.
+            bool hasWellDoneSnapshot = outputStack.Attributes.GetBool(WellDoneSnapshotAttribute);
+            float shelfLifeBonus = hasWellDoneSnapshot
+                ? outputStack.Attributes.GetFloat(WellDoneShelfLifeAttribute)
+                : playerAbility?.Tier > 0
+                    ? playerAbility.SkillDependentFValue()
+                    : 0.0f;
+
+            // Operation-only attributes must never remain on finished food because
+            // their presence prevents otherwise identical stacks from merging.
+            outputStack.Attributes.RemoveAttribute(WellDoneSnapshotAttribute);
+            outputStack.Attributes.RemoveAttribute(WellDoneShelfLifeAttribute);
+
+            ApplyWellDoneShelfLife(
+                outputStack,
+                contentStacks,
+                previousOutputStack,
+                world,
+                shelfLifeBonus
+            );
+            FreshnessAndQuality(sourceStacks ?? contentStacks, out float freshness, out float sourceQuality);
+            if (float.IsNaN(sourceQuality)) sourceQuality = 0.0f;
+
+            //gourmet
+            playerAbility = skill[this.GourmetId];
+            if (playerAbility?.Tier > 0)
+            {
+                float quality;
+                if ((sourceStacks != null ? sourceStacks.Length : contentStacks.Length) == 1 && sourceQuality > 0.0f)
+                {
+                    quality = sourceQuality * (charredQuality ? 0.2f : 1.1f);
+                }
+                else
+                {
+                    float toCalc = playerAbility.Value(1) - sourceQuality;
+                    quality = Math.Min(skill.Level, 25) * 0.1f + 2.0f * freshness + ingredientCount * 0.2f + ingredientDiversity;
+                    quality *= 0.3125f * playerAbility.Value(0);
+                    quality = Math.Min(quality + (float)world.Rand.NextDouble() * quality, playerAbility.Value(1));
+                    quality = quality / playerAbility.Value(1) * toCalc;
+                    quality += (sourceQuality * 1.1f);
+                }
+                if (liquidContainer == null)
+                {
+                    outputStack.Attributes.SetFloat("quality", (quality * totalCooked + oldQuality * (outputStack.StackSize - totalCooked)) / outputStack.StackSize);
+                }
+                else
+                {
+                    foreach (ItemStack stack in contentStacks)
+                    {
+                        stack.Attributes.SetFloat("quality", (quality));
+                    }
+                }
+            }
+            liquidContainer?.SetContents(outputStack, contentStacks);
+        }
+        /// <summary>Есть ли у игрока перк, отменяющий штраф качества за пережарку</summary>
+        public bool HasBurntMastery(IPlayer player)
+        {
+            PlayerAbility ability = player?.Entity?.GetBehavior<PlayerSkillSet>()?[this.Id]?[this.BurntMasteryId];
+            return (ability?.Tier ?? 0) > 0;
+        }
+
+        /// <summary>Предметы, которые пересушены по своей природе и не должны получать штраф качества за пережарку</summary>
+        private static readonly AssetLocation[] QualityExemptCodes =
+        {
+    new AssetLocation("expandedfoods", "hardtack-*")
+};
+
+        /// <summary>Освобождён ли предмет от штрафа качества за пережарку независимо от перков</summary>
+        public static bool IsQualityExempt(ItemStack stack)
+        {
+            AssetLocation code = stack?.Collectible?.Code;
+            if (code == null) return false;
+
+            foreach (AssetLocation exempt in QualityExemptCodes)
+            {
+                if (WildcardUtil.Match(exempt, code)) return true;
+            }
+            return false;
+        }
+
+        protected CookingRecipeStack GetResolvedIngredient(IWorldAccessor world, CookingRecipeStack recipeStack)
+        {
+            if (!recipeStack.Code.Path.Contains('*')) return recipeStack;
+            resolvedRecipeStacks.TryGetValue(recipeStack, out List<CookingRecipeStack> stacks);
+
+            if (stacks is null)
+            {
+                stacks = new List<CookingRecipeStack>();
+                if (recipeStack.Type == EnumItemClass.Item)
+                {
+                    foreach (Item item in world.Items)
+                    {
+                        if (item.WildCardMatch(recipeStack.Code))
+                        {
+                            CookingRecipeStack newRecipeStack = recipeStack.Clone();
+                            newRecipeStack.Code = item.Code;
+                            newRecipeStack.ResolvedItemstack = new ItemStack(item);
+                            stacks.Add(newRecipeStack);
+                        }
+                    }
+                }
+                if (recipeStack.Type == EnumItemClass.Block || recipeStack.Code.Path.Contains("mushroom"))
+                {
+                    foreach (Block block in world.Blocks)
+                    {
+                        if (block.WildCardMatch(recipeStack.Code))
+                        {
+                            CookingRecipeStack newRecipeStack = recipeStack.Clone();
+                            newRecipeStack.Code = block.Code;
+                            newRecipeStack.ResolvedItemstack = new ItemStack(block);
+                            stacks.Add(newRecipeStack);
+                        }
+                    }
+                }
+                resolvedRecipeStacks.Add(recipeStack, stacks);
+            }
+            if (stacks.Count == 0) return recipeStack;
+            return stacks[world.Rand.Next(stacks.Count - 1)];
+        }
+
+        public ItemStack GetMissingIngredient(ItemStack[] inputStacks, CookingRecipe recipe, IWorldAccessor world, bool allowBad)
+        {
+            List<ItemStack> inputStacksList = new List<ItemStack>(inputStacks);
+            List<CookingRecipeIngredient> ingredientList = new List<CookingRecipeIngredient>(recipe.Ingredients);
+
+            int[] quantities = new int[ingredientList.Count];
+
+            while (inputStacksList.Count > 0)
+            {
+                ItemStack inputStack = inputStacksList[0];
+                inputStacksList.RemoveAt(0);
+                if (inputStack == null) continue;
+
+                for (int ii = 0; ii < ingredientList.Count; ii++)
+                {
+                    CookingRecipeIngredient ingred = ingredientList[ii];
+                    if (ingred.Matches(inputStack))
+                    {
+                        quantities[ii]++;
+                        if (quantities[ii] >= ingred.MaxQuantity)
+                        {
+                            ingredientList.RemoveAt(ii);
+                        }
+                        break;
+                    }
+                }
+            }
+
+            int tries = 0;
+            ItemStack stack = null;
+            while (tries < 5 && stack == null && ingredientList.Count > 0)
+            {
+                tries++;
+                CookingRecipeIngredient ingred = ingredientList[world.Rand.Next(ingredientList.Count - 1)];
+                if (ingred.ValidStacks.Length == 0)
+                {
+                    ingredientList.Remove(ingred);
+                    continue;
+                }
+
+                int tries2 = 0;
+                while (tries2 < 5 && stack == null)
+                {
+                    tries2++;
+                    CookingRecipeStack recipeStack = ingred.ValidStacks[world.Rand.Next(ingred.ValidStacks.Length - 1)];
+                    recipeStack = GetResolvedIngredient(world, recipeStack);
+                    if (recipeStack?.ResolvedItemstack == null) continue;
+
+                    if (allowBad || recipeStack.ResolvedItemstack.Collectible.NutritionProps.Health >= 0)
+                    {
+                        stack = recipeStack.ResolvedItemstack.Clone();
+                    }
+                }
+            }
+            if (stack != null) stack.StackSize = 1;
+            return stack;
+        }
+
+        public void OnSaltyBackpack(PlayerAbility playerAbility, int oldTier)
+        {
+            IPlayer player = playerAbility.PlayerSkill.PlayerSkillSet.Player;
+            player.Entity.Stats.Set("perishMult", "ability", -1.0f + playerAbility.FValue(0));
+
+            InventoryBase backPackInv = player.InventoryManager.GetOwnInventory(GlobalConstants.backpackInvClassName) as InventoryBase;
+            InventoryBase hotBarInv = player.InventoryManager.GetOwnInventory(GlobalConstants.hotBarInvClassName) as InventoryBase;
+
+            if (backPackInv != null)
+            {
+                if (playerAbility.Tier == 0 && oldTier > 0) backPackInv.OnAcquireTransitionSpeed -= player.OnAcquireTransitionSpeed;
+                if (playerAbility.Tier > 0 && oldTier == 0) backPackInv.OnAcquireTransitionSpeed += player.OnAcquireTransitionSpeed;
+            }
+            if (hotBarInv != null)
+            {
+                if (playerAbility.Tier == 0 && oldTier > 0) hotBarInv.OnAcquireTransitionSpeed -= player.OnAcquireTransitionSpeed;
+                if (playerAbility.Tier > 0 && oldTier == 0) hotBarInv.OnAcquireTransitionSpeed += player.OnAcquireTransitionSpeed;
+            }
+        }
+    }//!class Cooking
+
+    [ProtoContract]
+    public class CookingSkillConfig : CustomSkillConfig
+    {
+        public override Dictionary<string, string> Attributes
+        {
+            get
+            {
+                CultureInfo provider = new CultureInfo("en-US");
+
+                Dictionary<string, string> result = new Dictionary<string, string>();
+                result.Add("expBase", this.expBase.ToString(provider));
+                result.Add("fruitPressExpPerLitre", this.fruitPressExpPerLitre.ToString(provider));
+
+                result.Add("bypassDesalinationLock", this.bypassDesalinationLock.ToString(provider));
+
+                return result;
+            }
+            set
+            {
+                string str;
+                NumberStyles styles = NumberStyles.Any;
+                CultureInfo provider = new CultureInfo("en-US");
+
+                value.TryGetValue("expBase", out str);
+                if (str != null) float.TryParse(str, styles, provider, out this.expBase);
+
+                value.TryGetValue("fruitPressExpPerLitre", out str);
+                if (str != null) float.TryParse(str, styles, provider, out this.fruitPressExpPerLitre);
+
+                value.TryGetValue("bypassDesalinationLock", out str);
+                if (str != null) bool.TryParse(str, out this.bypassDesalinationLock);
+            }
+        }
+
+        [ProtoMember(1)]
+        [DefaultValue(0.0004f)]
+        public float expBase = 0.0004f;
+
+        [ProtoMember(2)]
+        [DefaultValue(0.05f)]
+        public float fruitPressExpPerLitre = 0.05f;
+
+        [ProtoMember(3)]
+        [DefaultValue(false)]
+        public bool bypassDesalinationLock = false;
+    }
+
+    public class XskillsCookingRecipeNames : ICookingRecipeNamingHelper
+    {
+        public string GetNameForIngredients(IWorldAccessor worldForResolve, string recipeCode, ItemStack[] stacks)
+        {
+            if (recipeCode == null) return Lang.Get("game:unknown");
+            CookingRecipe recipe = worldForResolve.Api.GetCookingRecipe(recipeCode);
+            if (recipe == null) return Lang.Get("game:unknown");
+            ItemStack resultStack = recipe.CooksInto?.ResolvedItemstack;
+            if (resultStack == null) return Lang.Get("game:unknown");
+
+            switch (recipeCode)
+            {
+                case "lime":
+                    return resultStack.Collectible.GetHeldItemName(resultStack) + "\n" + Lang.Get("game:item-handbooktext-lime");
+                case "salt":
+                    return resultStack.Collectible.GetHeldItemName(resultStack) + "\n" + Lang.Get("game:item-handbooktext-salt");
+                default:
+                    return "";
+            }
+        }
+    }
+}//!namespace XSkills

@@ -1,0 +1,56 @@
+[
+    {
+        "file": "game:blocktypes/plant/reedpapyrus",
+        "op": "add",
+        "path": "/behaviorsByType",
+        "value": {
+            "*-harvested-*": [
+                {
+                    "name": "XSkillsGrass",
+                    "properties": { "xp": 0.20 }
+                }
+            ],
+            "*": [
+                {
+                    "name": "XSkillsGrass",
+                    "properties": { "xp": 0.10 }
+                }
+            ]
+        }
+    },
+    {
+        "file": "game:blocktypes/plant/tallgrass",
+        "op": "add",
+        "path": "/behaviorsByType/*/0",
+        "value": {
+            "name": "XSkillsGrass",
+            "properties": { "xp": 0.03 }
+        }
+    },
+    {
+        "file": "game:blocktypes/soil/farmland",
+        "op": "addmerge",
+        "path": "/behaviors",
+        "value": [ { "name": "XSkillsFarmland" } ],
+        "dependsOn": [
+            {
+                "modid": "farmlanddropssoil",
+                "invert": true
+            }
+        ]
+    },
+    {
+        "file": "game:blocktypes/reed/skep",
+        "op": "addmerge",
+        "path": "/behaviors",
+        "value": [
+            {
+                "name": "XSkillsSkep",
+                "properties": {
+                    "xp": 2.0,
+                    "harvestTime": 2.0
+                }
+            }
+        ]
+    }
+]
